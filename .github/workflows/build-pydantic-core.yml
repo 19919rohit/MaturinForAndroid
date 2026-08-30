@@ -5,17 +5,18 @@ on:
 
 env:
   PYTHON_VERSION: "3.14"
+  PYDANTIC_CORE_VERSION: "2.46.5"
   ANDROID_API: "24"
   NDK_VERSION: "25.2.9519653"
-  VERSION: "2.46.5"
-  TARGET: "aarch64-linux-android"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    name: Android ARM64 / Python 3.14
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Rust
         uses: dtolnay/rust-toolchain@stable
@@ -33,9 +34,9 @@ jobs:
       - name: NDK
         run: |
           yes | sdkmanager "ndk;${NDK_VERSION}" >/dev/null
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
-      - name: Build
+      - name: Build wheel
         run: |
           set -eux
 
@@ -46,18 +47,19 @@ jobs:
           cd build_src
 
           python -m pip download \
-            "pydantic-core==${VERSION}" \
+            "pydantic-core==${PYDANTIC_CORE_VERSION}" \
             --no-binary=:all: \
             --no-deps
 
-          tar -xzf "pydantic_core-${VERSION}.tar.gz"
-
-          SOURCE_DIR="pydantic_core-${VERSION}"
-          test -d "$SOURCE_DIR"
-          cd "$SOURCE_DIR"
+          tar -xzf pydantic_core-${PYDANTIC_CORE_VERSION}.tar.gz
+          cd "pydantic_core-${PYDANTIC_CORE_VERSION}"
 
           NDK="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
           BIN="$NDK/bin"
+          SYSROOT="$NDK/sysroot"
+          MOCK="$GITHUB_WORKSPACE/mock_python"
+
+          mkdir -p "$MOCK"
 
           export PATH="$BIN:$PATH"
 
@@ -66,66 +68,80 @@ jobs:
           export AR_aarch64_linux_android="$BIN/llvm-ar"
           export RANLIB_aarch64_linux_android="$BIN/llvm-ranlib"
 
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android${ANDROID_API}-clang"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
 
-          MOCK="$GITHUB_WORKSPACE/mock_python"
-          mkdir -p "$MOCK"
-
-          "$CC_aarch64_linux_android" \
+          "$BIN/clang" \
+            --target=aarch64-linux-android${ANDROID_API} \
             -shared \
             -Wl,-soname,libpython3.14.so \
             -o "$MOCK/libpython3.14.so" \
             -xc /dev/null
 
-          cat > "$MOCK/_sysconfigdata__linux_aarch64-linux-android.py" <<EOF
+          LIBDL="$(find "$SYSROOT" \
+            -path '*aarch64-linux-android*' \
+            -name 'libdl.so' | head -n1)"
+
+          [ -z "$LIBDL" ] || cp "$LIBDL" "$MOCK/"
+
+          SYSCONFIG="_sysconfigdata__linux_aarch64-linux-android"
+
+          cat > "$MOCK/${SYSCONFIG}.py" <<EOF
           build_time_vars = {
-              "ABIFLAGS": "",
               "abiflags": "",
+              "ABIFLAGS": "",
               "SO": ".so",
               "SOABI": "cpython-314",
               "EXT_SUFFIX": ".so",
-              "VERSION": "3.14",
               "LIBDIR": "$MOCK",
               "LDLIBRARY": "libpython3.14.so",
               "Py_ENABLE_SHARED": 1,
-              "CC": "$CC_aarch64_linux_android",
-              "CXX": "$CXX_aarch64_linux_android",
-              "LDSHARED": "$CC_aarch64_linux_android -shared",
+              "CC": "clang",
+              "CXX": "clang++",
+              "VERSION": "3.14",
+              "LDSHARED": "clang -shared",
               "LDFLAGS": "",
               "CCSHARED": "-fPIC",
+              "GNULD": "yes",
               "Py_DEBUG": 0,
               "WITH_PYMALLOC": 1,
           }
           EOF
 
           export PYO3_CROSS_LIB_DIR="$MOCK"
-          export PYO3_CROSS_PYTHON_VERSION="$PYTHON_VERSION"
-          export PYTHONPATH="$MOCK"
-          export _PYTHON_SYSCONFIGDATA_NAME="_sysconfigdata__linux_aarch64-linux-android"
+          export PYO3_CROSS_PYTHON_VERSION="${PYTHON_VERSION}"
+          export PYTHONPATH="$MOCK${PYTHONPATH:+:$PYTHONPATH}"
+          export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONFIG"
 
-          mkdir -p .cargo
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="\
+          -L native=$MOCK \
+          -C link-arg=--target=aarch64-linux-android${ANDROID_API} \
+          -C link-arg=-Wl,--no-as-needed \
+          -C link-arg=-lpython3.14 \
+          -C link-arg=-Wl,--as-needed \
+          -C link-arg=-Wl,--unresolved-symbols=ignore-all"
 
-          cat > .cargo/config.toml <<EOF
-          [target.aarch64-linux-android]
-          linker = "$BIN/aarch64-linux-android${ANDROID_API}-clang"
-          ar = "$BIN/llvm-ar"
-          EOF
+          echo "========================================"
+          echo "BUILDING PYDANTIC-CORE"
+          echo "========================================"
 
           maturin build \
             --release \
             --strip \
-            --target "$TARGET" \
+            --target aarch64-linux-android \
             --interpreter python3.14 \
-            --compatibility off
+            --skip-auditwheel
 
-      - name: Show wheel
-        run: |
-          ls -lh build_src/pydantic_core-${{ env.VERSION }}/target/wheels/
+          echo
+          echo "========================================"
+          echo "RESULT"
+          echo "========================================"
+
+          ls -lh target/wheels/
+          file target/wheels/*.whl
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          name: pydantic-core-${{ env.VERSION }}-android-arm64-cp314
-          path: build_src/pydantic_core-${{ env.VERSION }}/target/wheels/*.whl
-          if-no-files-found: error
-          retention-days: 30
+          name: pydantic-core-android-aarch64-cp314
+          path: build_src/pydantic_core-${{ env.PYDANTIC_CORE_VERSION }}/target/wheels/*.whl
+          retention-days: 7
