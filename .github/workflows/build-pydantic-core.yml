@@ -14,66 +14,157 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ============================================================
+      # RUST
+      # ============================================================
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
+      # ============================================================
+      # PYTHON
+      # ============================================================
+
       - name: Setup Python 3.14
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
 
+      # ============================================================
+      # ANDROID SDK
+      # ============================================================
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      # ============================================================
+      # ANDROID NDK
+      # ============================================================
 
       - name: Install Android NDK
         run: |
           yes | sdkmanager "ndk;${NDK_VERSION}" >/dev/null
+
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # MATURIN
+      # ============================================================
 
       - name: Install Maturin
         run: |
-          pip install maturin
+          python -m pip install --upgrade pip
+          python -m pip install maturin
+
+      # ============================================================
+      # DOWNLOAD PYDANTIC-CORE SOURCE
+      # ============================================================
 
       - name: Download pydantic-core source
         run: |
+          set -eux
+
           mkdir -p build_src
+
           cd build_src
-          pip download pydantic-core \
+
+          python -m pip download \
+            pydantic-core \
             --no-binary :all: \
             --no-deps
 
           tar -xzf pydantic_core-*.tar.gz
-          echo "SOURCE_DIR=$(find "$PWD" -maxdepth 1 -type d -name 'pydantic_core-*' | head -n 1)" >> "$GITHUB_ENV"
+
+          SOURCE_DIR="$(find "$PWD" \
+            -maxdepth 1 \
+            -type d \
+            -name 'pydantic_core-*' \
+            | head -n 1)"
+
+          echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
+
+          echo "Source directory:"
+          echo "$SOURCE_DIR"
+
+      # ============================================================
+      # BUILD ANDROID WHEEL
+      # ============================================================
 
       - name: Build Android wheel
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -eux
 
+          # --------------------------------------------------------
+          # NDK PATHS
+          # --------------------------------------------------------
+
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
           NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
           export PATH="$NDK_BIN:$PATH"
 
+          # --------------------------------------------------------
+          # ANDROID C/C++ COMPILERS
+          # --------------------------------------------------------
+
           export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang"
+
           export CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang++"
 
           export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+
           export RANLIB_aarch64_linux_android="$NDK_BIN/llvm-ranlib"
+
+          # --------------------------------------------------------
+          # CARGO LINKER
+          # --------------------------------------------------------
 
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang"
 
-          # ---------------------------------------------------------
-          # Mock Python library for PyO3 cross compilation
-          # ---------------------------------------------------------
+          # --------------------------------------------------------
+          # SHOW TOOLCHAIN
+          # --------------------------------------------------------
+
+          echo "============================================"
+          echo "ANDROID TOOLCHAIN"
+          echo "============================================"
+
+          echo "NDK:"
+          echo "$ANDROID_NDK_HOME"
+
+          echo "Compiler:"
+          echo "$CC_aarch64_linux_android"
+
+          echo "C++ compiler:"
+          echo "$CXX_aarch64_linux_android"
+
+          echo "Cargo linker:"
+          echo "$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+
+          "$CC_aarch64_linux_android" --version
+
+          # ========================================================
+          # MOCK PYTHON LIBRARY FOR PYO3
+          # ========================================================
 
           MOCK_DIR="$GITHUB_WORKSPACE/mock_python"
+
           mkdir -p "$MOCK_DIR"
+
+          echo "============================================"
+          echo "CREATING MOCK PYTHON"
+          echo "============================================"
 
           "$NDK_BIN/clang" \
             --target=aarch64-linux-android${ANDROID_API} \
@@ -82,14 +173,24 @@ jobs:
             -o "$MOCK_DIR/libpython3.14.so" \
             -xc /dev/null
 
-          LIBDL_PATH=$(find "$NDK_SYSROOT" \
-            -path '*aarch64-linux-android*' \
-            -name 'libdl.so' \
-            | head -n 1)
+          # --------------------------------------------------------
+          # FIND ANDROID libdl
+          # --------------------------------------------------------
+
+          LIBDL_PATH="$(
+            find "$NDK_SYSROOT" \
+              -path '*aarch64-linux-android*' \
+              -name 'libdl.so' \
+              | head -n 1
+          )"
 
           if [ -n "$LIBDL_PATH" ]; then
             cp "$LIBDL_PATH" "$MOCK_DIR/"
           fi
+
+          # --------------------------------------------------------
+          # PYTHON SYSCONFIG
+          # --------------------------------------------------------
 
           SYSCONFIG_NAME="_sysconfigdata__linux_aarch64-linux-android"
 
@@ -97,19 +198,28 @@ jobs:
           build_time_vars = {
               "abiflags": "",
               "ABIFLAGS": "",
+
               "SO": ".so",
               "SOABI": "cpython-314",
               "EXT_SUFFIX": ".so",
+
               "LIBDIR": "__MOCK_DIR__",
+
               "LDLIBRARY": "libpython3.14.so",
               "Py_ENABLE_SHARED": 1,
+
               "CC": "clang",
               "CXX": "clang++",
+
               "VERSION": "3.14",
+
               "LDSHARED": "clang -shared",
+
               "LDFLAGS": "",
               "CCSHARED": "-fPIC",
+
               "GNULD": "yes",
+
               "Py_DEBUG": 0,
               "WITH_PYMALLOC": 1,
           }
@@ -118,14 +228,51 @@ jobs:
           sed -i "s|__MOCK_DIR__|$MOCK_DIR|g" \
             "$MOCK_DIR/${SYSCONFIG_NAME}.py"
 
+          # ========================================================
+          # PYO3 CROSS COMPILATION
+          # ========================================================
+
           export PYO3_CROSS_LIB_DIR="$MOCK_DIR"
-          export PYO3_CROSS_PYTHON_VERSION="3.14"
-          export PYTHONPATH="$MOCK_DIR:$PYTHONPATH"
+
+          export PYO3_CROSS_PYTHON_VERSION="$PYTHON_VERSION"
+
+          # IMPORTANT:
+          # GitHub Actions normally does NOT define PYTHONPATH.
+          # With `set -u`, `$PYTHONPATH` would therefore crash.
+          #
+          # `${PYTHONPATH:-}` safely expands to an empty string
+          # when PYTHONPATH does not exist.
+
+          export PYTHONPATH="$MOCK_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONFIG_NAME"
 
-          # ---------------------------------------------------------
-          # Android linker flags
-          # ---------------------------------------------------------
+          # ========================================================
+          # DISPLAY PYO3 CONFIG
+          # ========================================================
+
+          echo "============================================"
+          echo "PYO3 CONFIGURATION"
+          echo "============================================"
+
+          echo "PYO3_CROSS_LIB_DIR:"
+          echo "$PYO3_CROSS_LIB_DIR"
+
+          echo "PYO3_CROSS_PYTHON_VERSION:"
+          echo "$PYO3_CROSS_PYTHON_VERSION"
+
+          echo "PYTHONPATH:"
+          echo "$PYTHONPATH"
+
+          echo "PYTHON SYSCONFIG:"
+          echo "$_PYTHON_SYSCONFIGDATA_NAME"
+
+          echo "Mock directory:"
+          ls -lah "$MOCK_DIR"
+
+          # ========================================================
+          # ANDROID LINKER FLAGS
+          # ========================================================
 
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="\
           -L native=$MOCK_DIR \
@@ -136,9 +283,13 @@ jobs:
           -C link-arg=-Wl,--unresolved-symbols=ignore-all \
           -C link-arg=-Wl,-rpath=/data/data/com.termux/files/usr/lib"
 
-          # ---------------------------------------------------------
-          # Build
-          # ---------------------------------------------------------
+          # ========================================================
+          # BUILD
+          # ========================================================
+
+          echo "============================================"
+          echo "BUILDING PYDANTIC-CORE"
+          echo "============================================"
 
           maturin build \
             --release \
@@ -147,10 +298,25 @@ jobs:
             --interpreter python3.14 \
             --skip-auditwheel
 
+      # ============================================================
+      # SHOW RESULT
+      # ============================================================
+
       - name: Show wheel
         run: |
+          echo "============================================"
+          echo "GENERATED WHEEL"
+          echo "============================================"
+
           ls -lh "${{ env.SOURCE_DIR }}/target/wheels/"
+
+          echo
+          echo "File information:"
           file "${{ env.SOURCE_DIR }}"/target/wheels/*
+
+      # ============================================================
+      # UPLOAD
+      # ============================================================
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
