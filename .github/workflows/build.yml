@@ -1,0 +1,107 @@
+name: Build Maturin for Termux Android ARM64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MATURIN_VERSION: v1.14.1
+  ANDROID_NDK_VERSION: r26d
+  ANDROID_API_LEVEL: "24"
+
+jobs:
+  build:
+    name: Maturin ${{ env.MATURIN_VERSION }} • Android ARM64
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v5
+
+      - name: Checkout Maturin source
+        uses: actions/checkout@v5
+        with:
+          repository: PyO3/maturin
+          ref: ${{ env.MATURIN_VERSION }}
+          path: maturin-src
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Configure Android linker
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CLANG="$NDK_BIN/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+
+          test -x "$CLANG"
+          test -x "$NDK_BIN/llvm-ar"
+
+          echo "CC_aarch64_linux_android=$CLANG" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG" >> "$GITHUB_ENV"
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+          rustup target list --installed
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API_LEVEL}-clang" --version
+
+      - name: Build Maturin
+        working-directory: maturin-src
+        run: |
+          cargo build \
+            --release \
+            --target aarch64-linux-android \
+            --bin maturin
+
+      - name: Verify Maturin
+        working-directory: maturin-src
+        run: |
+          set -euxo pipefail
+
+          BINARY="target/aarch64-linux-android/release/maturin"
+
+          test -f "$BINARY"
+          test -x "$BINARY"
+
+          file "$BINARY"
+          ls -lh "$BINARY"
+
+      - name: Prepare artifact
+        working-directory: maturin-src
+        run: |
+          set -euxo pipefail
+
+          mkdir -p ../dist
+
+          cp target/aarch64-linux-android/release/maturin \
+             ../dist/maturin-aarch64-linux-android
+
+          chmod +x ../dist/maturin-aarch64-linux-android
+
+          tar -C ../dist \
+            -czf ../dist/maturin-aarch64-linux-android.tar.gz \
+            maturin-aarch64-linux-android
+
+          sha256sum ../dist/maturin-aarch64-linux-android \
+                    ../dist/maturin-aarch64-linux-android.tar.gz
+
+      - name: Upload Maturin binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: maturin-aarch64-linux-android
+          path: dist/
+          if-no-files-found: error
