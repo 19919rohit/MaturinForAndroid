@@ -50,8 +50,11 @@ jobs:
             --no-binary=:all: \
             --no-deps
 
-          tar -xzf pydantic_core-*.tar.gz
-          cd pydantic_core-*
+          tar -xzf "pydantic_core-${VERSION}.tar.gz"
+
+          SOURCE_DIR="pydantic_core-${VERSION}"
+          test -d "$SOURCE_DIR"
+          cd "$SOURCE_DIR"
 
           NDK="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
           BIN="$NDK/bin"
@@ -117,12 +120,12 @@ jobs:
 
       - name: Show wheel
         run: |
-          ls -lh build_src/pydantic_core-*/target/wheels/
+          ls -lh build_src/pydantic_core-${{ env.VERSION }}/target/wheels/
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
           name: pydantic-core-${{ env.VERSION }}-android-arm64-cp314
-          path: build_src/pydantic_core-*/target/wheels/*.whl
+          path: build_src/pydantic_core-${{ env.VERSION }}/target/wheels/*.whl
           if-no-files-found: error
           retention-days: 30
