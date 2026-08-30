@@ -1,11 +1,11 @@
-name: Build Tornado Android ARM64 Wheel
+name: Build Tornado Android ARM64
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Tornado - Android ARM64 - CPython 3.14
+  build-tornado:
+    name: Tornado Android CPython 3.14 ARM64
     runs-on: ubuntu-24.04
 
     steps:
@@ -20,7 +20,7 @@ jobs:
       # PYTHON
       # ============================================================
 
-      - name: Set up Python
+      - name: Setup Python 3.14
         uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -32,6 +32,10 @@ jobs:
       - name: Show environment
         run: |
           set -eux
+
+          echo "============================================================"
+          echo "SYSTEM"
+          echo "============================================================"
 
           python --version
           python -c "import sys; print(sys.version)"
@@ -52,64 +56,94 @@ jobs:
             build \
             packaging
 
-          cibuildwheel \
-            --print-build-identifiers \
-            --platform android \
-            --archs arm64_v8a
+          echo
+          echo "cibuildwheel:"
+          python -m cibuildwheel --help | head -30
 
       # ============================================================
-      # CREATE TEMPORARY TORNADO PACKAGE
+      # GET TORNADO
       # ============================================================
 
-      - name: Prepare Tornado source
-        shell: bash
+      - name: Clone Tornado
         run: |
           set -eux
 
           rm -rf tornado-build
-          mkdir -p tornado-build
-
-          cd tornado-build
 
           git clone \
             --depth 1 \
             https://github.com/tornadoweb/tornado.git \
-            .
+            tornado-build
 
           echo
-          echo "Tornado source:"
+          echo "============================================================"
+          echo "TORNADO SOURCE"
+          echo "============================================================"
+
+          cd tornado-build
+
           git log -1 --oneline
 
           echo
-          echo "Project files:"
+          echo "Root files:"
           ls -la
 
-          test -f pyproject.toml
+          echo
+          echo "Python metadata:"
+
+          if [ -f pyproject.toml ]; then
+            echo "pyproject.toml: FOUND"
+          else
+            echo "ERROR: pyproject.toml missing"
+            exit 1
+          fi
 
       # ============================================================
-      # BUILD ANDROID WHEEL
+      # SHOW BUILD IDENTIFIERS
       # ============================================================
 
-      - name: Build Android ARM64 wheel
+      - name: Show Android build identifiers
+        working-directory: tornado-build
+        run: |
+          set -eux
+
+          echo "============================================================"
+          echo "ANDROID BUILD IDENTIFIERS"
+          echo "============================================================"
+
+          cibuildwheel \
+            --platform android \
+            --archs arm64_v8a \
+            --print-build-identifiers \
+            .
+
+      # ============================================================
+      # BUILD
+      # ============================================================
+
+      - name: Build Tornado Android wheel
+        working-directory: tornado-build
         env:
           CIBW_PLATFORM: android
           CIBW_ARCHS: arm64_v8a
 
-          # Target Android API 24.
+          # Android API level.
           CIBW_ANDROID_API_LEVEL: "24"
 
-          # CPython 3.14 only.
+          # CPython 3.14 / Android ARM64.
           CIBW_BUILD: "cp314-android_arm64_v8a"
 
-          # Do not test the wheel on the Ubuntu host.
+          # Android wheel cannot be tested directly on Ubuntu.
           CIBW_TEST_SKIP: "*"
 
         run: |
           set -eux
 
-          cd tornado-build
-
           mkdir -p ../wheelhouse
+
+          echo "============================================================"
+          echo "BUILDING TORNADO"
+          echo "============================================================"
 
           cibuildwheel \
             --platform android \
@@ -119,10 +153,10 @@ jobs:
             .
 
       # ============================================================
-      # INSPECT RESULT
+      # INSPECT
       # ============================================================
 
-      - name: Inspect wheel
+      - name: Inspect generated wheel
         run: |
           set -eux
 
@@ -137,16 +171,16 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "WHEEL DETAILS"
+          echo "FILE SIZES"
           echo "============================================================"
 
-          python -m zipfile -l wheelhouse/*.whl | head -100
+          ls -lh wheelhouse/
 
       # ============================================================
-      # VERIFY WHEEL TAG
+      # VALIDATE
       # ============================================================
 
-      - name: Verify Android wheel
+      - name: Validate wheel
         run: |
           set -eux
 
@@ -160,26 +194,28 @@ jobs:
           fi
 
           for wheel in "${wheels[@]}"; do
-            echo
-            echo "Produced:"
-            basename "$wheel"
+            name="$(basename "$wheel")"
 
-            case "$(basename "$wheel")" in
+            echo
+            echo "Wheel:"
+            echo "$name"
+
+            case "$name" in
               *cp314*android_24_arm64_v8a.whl)
-                echo "Android CPython 3.14 ARM64 wheel: OK"
+                echo "Android CPython 3.14 ARM64: OK"
                 ;;
               *)
-                echo "WARNING: Unexpected wheel tag:"
-                basename "$wheel"
+                echo "ERROR: Unexpected wheel tag."
+                exit 1
                 ;;
             esac
           done
 
       # ============================================================
-      # UPLOAD ARTIFACT
+      # UPLOAD
       # ============================================================
 
-      - name: Upload Android wheel
+      - name: Upload Tornado Android wheel
         uses: actions/upload-artifact@v4
         with:
           name: tornado-android-cp314-arm64
