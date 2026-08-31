@@ -1,41 +1,31 @@
-name: Build Native Rust Compiler for Android ARM64
+name: Build Rust Compiler for Android
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
-env:
-  RUST_VERSION: "1.97.1"
-  BOOTSTRAP_VERSION: "1.97.0"
-  HOST: "aarch64-linux-android"
-  TARGET: "aarch64-linux-android"
-  BUILD: "x86_64-unknown-linux-gnu"
-  ANDROID_API: "24"
-  NDK_VERSION: "29.0.14206865"
-
 jobs:
-  build:
-    name: Native rustc for Android ARM64
-    runs-on: ubuntu-24.04
+  build-rust:
+    runs-on: ubuntu-latest
 
     steps:
-
-      # ============================================================
-      # 1. Checkout Rust source
-      # ============================================================
-
-      - name: Checkout Rust source
+      - name: Checkout Rust
         uses: actions/checkout@v4
         with:
           repository: rust-lang/rust
-          ref: "${{ env.RUST_VERSION }}"
+          ref: master
           fetch-depth: 1
 
-      # ============================================================
-      # 2. Install normal host tools
-      # ============================================================
+      - name: Install Android NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sdkmanager --install "ndk;29.0.14206865"
+
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
       - name: Install build dependencies
         shell: bash
@@ -45,155 +35,61 @@ jobs:
           sudo apt-get update
 
           sudo apt-get install -y \
-            build-essential \
             clang \
-            cmake \
-            curl \
-            file \
-            git \
             lld \
             llvm \
+            cmake \
             ninja-build \
-            pkg-config \
             python3 \
-            python3-pip \
-            python3-setuptools \
-            rsync \
-            tar \
-            unzip \
-            wget \
-            xz-utils \
-            zlib1g-dev
+            curl \
+            git \
+            pkg-config \
+            libssl-dev \
+            build-essential
 
-      # ============================================================
-      # 3. Android SDK
-      # ============================================================
+      - name: Install Rust stage0 toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      # ============================================================
-      # 4. Android NDK
-      # ============================================================
-
-      - name: Install Android NDK
+      - name: Configure Android tools
         shell: bash
         run: |
           set -euxo pipefail
 
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "ndk;${NDK_VERSION}"
+          NDK="$ANDROID_NDK_HOME"
+          LLVM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          echo \
-            "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" \
-            >> "$GITHUB_ENV"
+          test -x "$LLVM/aarch64-linux-android24-clang"
+          test -x "$LLVM/aarch64-linux-android24-clang++"
+          test -x "$LLVM/llvm-ar"
 
-      # ============================================================
-      # 5. Install bootstrap Rust
-      #
-      # This Rust compiler runs on the GitHub runner.
-      # It is NOT the final Android compiler.
-      # ============================================================
+          mkdir -p android-tools
 
-      - name: Install bootstrap Rust
-        shell: bash
-        run: |
-          set -euxo pipefail
+          ln -sf \
+            "$LLVM/aarch64-linux-android24-clang" \
+            android-tools/aarch64-linux-android-clang
 
-          curl --proto '=https' \
-            --tlsv1.2 \
-            -sSf \
-            https://sh.rustup.rs \
-            | sh -s -- \
-              -y \
-              --profile minimal \
-              --default-toolchain none
+          ln -sf \
+            "$LLVM/aarch64-linux-android24-clang++" \
+            android-tools/aarch64-linux-android-clang++
 
-          source "$HOME/.cargo/env"
+          ln -sf \
+            "$LLVM/llvm-ar" \
+            android-tools/aarch64-linux-android-ar
 
-          rustup toolchain install \
-            "${BOOTSTRAP_VERSION}-x86_64-unknown-linux-gnu" \
-            --profile minimal
-
-          rustup default \
-            "${BOOTSTRAP_VERSION}-x86_64-unknown-linux-gnu"
-
-          rustc --version
-          cargo --version
-
-      # ============================================================
-      # 6. Configure Android NDK
-      # ============================================================
-
-      - name: Configure Android NDK
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          NDK="$ANDROID_NDK_ROOT"
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-
-          BIN="$TOOLCHAIN/bin"
-
-          test -x "$BIN/clang"
-          test -x "$BIN/llvm-ar"
-          test -x "$BIN/ld.lld"
-
-          echo "NDK:"
-          "$BIN/clang" --version
-
-          echo "ANDROID_NDK_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_BIN=$BIN" >> "$GITHUB_ENV"
-
-      # ============================================================
-      # 7. Create explicit Android compiler wrappers
-      #
-      # Rust's bootstrap system can use these directly.
-      # ============================================================
-
-      - name: Create Android compiler wrappers
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p "$GITHUB_WORKSPACE/android-tools"
-
-          cat > "$GITHUB_WORKSPACE/android-tools/aarch64-linux-android-clang" <<EOF
-          #!/bin/sh
-          exec "$ANDROID_NDK_BIN/aarch64-linux-android${ANDROID_API}-clang" "\$@"
+          cat > android-tools/aarch64-linux-android-linker <<EOF
+          #!/bin/bash
+          exec "$LLVM/aarch64-linux-android24-clang" "\$@"
           EOF
 
-          cat > "$GITHUB_WORKSPACE/android-tools/aarch64-linux-android-clang++" <<EOF
-          #!/bin/sh
-          exec "$ANDROID_NDK_BIN/aarch64-linux-android${ANDROID_API}-clang++" "\$@"
-          EOF
+          chmod +x android-tools/aarch64-linux-android-linker
 
-          cat > "$GITHUB_WORKSPACE/android-tools/aarch64-linux-android-ar" <<EOF
-          #!/bin/sh
-          exec "$ANDROID_NDK_BIN/llvm-ar" "\$@"
-          EOF
+          echo "=== Android tools ==="
+          ls -lah android-tools
 
-          cat > "$GITHUB_WORKSPACE/android-tools/aarch64-linux-android-linker" <<EOF
-          #!/bin/sh
-          exec "$ANDROID_NDK_BIN/aarch64-linux-android${ANDROID_API}-clang" "\$@"
-          EOF
+          echo "=== NDK ==="
+          "$LLVM/aarch64-linux-android24-clang" --version
 
-          chmod +x "$GITHUB_WORKSPACE/android-tools/"*
-
-          echo "$GITHUB_WORKSPACE/android-tools" >> "$GITHUB_PATH"
-
-      # ============================================================
-      # 8. Rust bootstrap configuration
-      #
-      # BUILD  = x86_64 Linux
-      # HOST   = Android ARM64
-      #
-      # Therefore the resulting rustc itself is Android ARM64.
-      # ============================================================
-
-      - name: Configure Rust bootstrap
+      - name: Write bootstrap configuration
         shell: bash
         run: |
           set -euxo pipefail
@@ -202,32 +98,28 @@ jobs:
           change-id = 99999
 
           [build]
-          build = "${BUILD}"
-          host = ["${HOST}"]
-          target = ["${TARGET}"]
-
+          build = "x86_64-unknown-linux-gnu"
+          host = ["aarch64-linux-android"]
+          target = ["aarch64-linux-android"]
           jobs = 2
-
-          extended = true
-          tools = ["cargo", "rustfmt"]
+          extended = false
 
           [rust]
-          channel = "stable"
           optimize = true
           debug = false
           debuginfo-level = 0
 
           [llvm]
-          download-ci-llvm = false
+          download-ci-llvm = true
 
-          [target.${HOST}]
+          [target.aarch64-linux-android]
           cc = "${GITHUB_WORKSPACE}/android-tools/aarch64-linux-android-clang"
           cxx = "${GITHUB_WORKSPACE}/android-tools/aarch64-linux-android-clang++"
           linker = "${GITHUB_WORKSPACE}/android-tools/aarch64-linux-android-linker"
           ar = "${GITHUB_WORKSPACE}/android-tools/aarch64-linux-android-ar"
-          android-ndk = "${ANDROID_NDK_TOOLCHAIN}"
+          android-ndk = "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
 
-          [target.${BUILD}]
+          [target.x86_64-unknown-linux-gnu]
           cc = "clang"
           cxx = "clang++"
           linker = "clang"
@@ -237,119 +129,142 @@ jobs:
           echo "================================================"
           echo "bootstrap.toml"
           echo "================================================"
-
           cat bootstrap.toml
 
-      # ============================================================
-      # 9. Verify Rust understands the configuration
-      # ============================================================
-
-      - name: Show Rust bootstrap configuration
+      - name: Verify bootstrap environment
         shell: bash
         run: |
           set -euxo pipefail
 
-          source "$HOME/.cargo/env"
+          echo "=== Rust ==="
+          rustc --version
+          cargo --version
 
-          ./x.py \
-            check \
-            --config bootstrap.toml \
-            --host "${HOST}" \
-            --target "${TARGET}"
+          echo "=== Host ==="
+          rustc -vV
 
-      # ============================================================
-      # 10. Build the Android stage-1 compiler
-      #
-      # This is the first real Android rustc.
-      # ============================================================
+          echo "=== NDK ==="
+          echo "$ANDROID_NDK_HOME"
 
-      - name: Build Android Rust compiler
+          echo "=== Target compiler ==="
+          android-tools/aarch64-linux-android-clang \
+            --version
+
+          echo "=== Disk ==="
+          df -h
+
+          echo "=== Memory ==="
+          free -h
+
+      - name: Build Android rustc
         shell: bash
-        timeout-minutes: 240
         run: |
           set -euxo pipefail
 
-          source "$HOME/.cargo/env"
-
           ./x.py \
+            --verbose \
             build \
-            --config bootstrap.toml \
             --stage 1 \
-            --host "${HOST}" \
-            --target "${TARGET}" \
-            compiler/rustc \
-            library/std
+            compiler/rustc
 
-      # ============================================================
-      # 11. Build stage-2 Android compiler
-      #
-      # Stage 2 is the proper release-quality compiler.
-      # ============================================================
-
-      - name: Build stage-2 Android Rust compiler
-        shell: bash
-        timeout-minutes: 360
-        run: |
-          set -euxo pipefail
-
-          source "$HOME/.cargo/env"
-
-          ./x.py \
-            build \
-            --config bootstrap.toml \
-            --stage 2 \
-            --host "${HOST}" \
-            --target "${TARGET}" \
-            compiler/rustc \
-            library/std \
-            src/tools/cargo \
-            src/tools/rustfmt
-
-      # ============================================================
-      # 12. Build distributable artifacts
-      # ============================================================
-
-      - name: Build Rust distribution
-        shell: bash
-        timeout-minutes: 360
-        run: |
-          set -euxo pipefail
-
-          source "$HOME/.cargo/env"
-
-          ./x.py \
-            dist \
-            --config bootstrap.toml \
-            --stage 2 \
-            --host "${HOST}" \
-            --target "${TARGET}" \
-            rustc \
-            rust-std \
-            cargo \
-            rustfmt
-
-      # ============================================================
-      # 13. Locate generated Android archives
-      # ============================================================
-
-      - name: Inspect distribution
+      - name: Locate rustc
+        if: always()
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "================================================"
-          echo "Generated distribution files"
-          echo "================================================"
+          echo "=== rustc binaries ==="
 
-          find build/dist \
-            -maxdepth 1 \
+          find build \
             -type f \
-            -printf '%f\n' \
-            | sort
+            \( -name rustc -o -name rustc.exe \) \
+            -print 2>/dev/null || true
 
-      # ============================================================
-      # 14. Install the Android toolchain into a prefix
-      # ============================================================
+          echo "=== Android files ==="
+
+          find build \
+            -type f \
+            -path '*aarch64-linux-android*' \
+            -print 2>/dev/null | head -100 || true
+
+      - name: System diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "BUILD DIAGNOSTICS"
+          echo "========================================"
+
+          echo "=== Exit environment ==="
+          env | sort | grep -E \
+            '^(RUST|CARGO|ANDROID|CC|CXX|AR|PATH)=' || true
+
+          echo
+          echo "=== Disk ==="
+          df -h
+
+          echo
+          echo "=== Memory ==="
+          free -h
+
+          echo
+          echo "=== Processes ==="
+          ps aux --sort=-%mem | head -30 || true
+
+          echo
+          echo "=== Build directory ==="
+          du -sh build 2>/dev/null || true
+
+          echo
+          echo "=== Recent files ==="
+          find build -type f -printf '%T@ %p\n' \
+            2>/dev/null \
+            | sort -nr \
+            | head -50 || true
+
+      - name: Package compiler
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p dist
+
+          RUSTC="$(find build \
+            -type f \
+            -path '*aarch64-linux-android*' \
+            -name rustc \
+            -perm -111 \
+            | head -1)"
+
+          if [ -z "$RUSTC" ]; then
+            echo "Android rustc was not found."
+            exit 1
+          fi
+
+          echo "Found:"
+          echo "$RUSTC"
+
+          cp "$RUSTC" \
+            dist/rustc-aarch64-linux-android
+
+          chmod +x \
+            dist/rustc-aarch64-linux-android
+
+          file \
+            dist/rustc-aarch64-linux-android
+
+          ls -lh dist/
+
+          sha256sum dist/*
+
+      - name: Upload compiler
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustc-aarch64-linux-android
+          path: dist/
+          if-no-files-found: error=======================
 
       - name: Install Android Rust toolchain
         shell: bash
