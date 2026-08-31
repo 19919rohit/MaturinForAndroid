@@ -1,0 +1,571 @@
+name: Build Native Rust Compiler for Android ARM64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.97.1"
+  BOOTSTRAP_VERSION: "1.97.0"
+  HOST: "aarch64-linux-android"
+  TARGET: "aarch64-linux-android"
+  BUILD: "x86_64-unknown-linux-gnu"
+  ANDROID_API: "24"
+  NDK_VERSION: "29.0.14206865"
+
+jobs:
+  build:
+    name: Native rustc for Android ARM64
+    runs-on: ubuntu-24.04
+
+    steps:
+
+      # ============================================================
+      # 1. Checkout Rust source
+      # ============================================================
+
+      - name: Checkout Rust source
+        uses: actions/checkout@v4
+        with:
+          repository: rust-lang/rust
+          ref: "${{ env.RUST_VERSION }}"
+          fetch-depth: 1
+
+      # ============================================================
+      # 2. Install normal host tools
+      # ============================================================
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            cmake \
+            curl \
+            file \
+            git \
+            lld \
+            llvm \
+            ninja-build \
+            pkg-config \
+            python3 \
+            python3-pip \
+            python3-setuptools \
+            rsync \
+            tar \
+            unzip \
+            wget \
+            xz-utils \
+            zlib1g-dev
+
+      # ============================================================
+      # 3. Android SDK
+      # ============================================================
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ============================================================
+      # 4. Android NDK
+      # ============================================================
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "ndk;${NDK_VERSION}"
+
+          echo \
+            "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" \
+            >> "$GITHUB_ENV"
+
+      # ============================================================
+      # 5. Install bootstrap Rust
+      #
+      # This Rust compiler runs on the GitHub runner.
+      # It is NOT the final Android compiler.
+      # ============================================================
+
+      - name: Install bootstrap Rust
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          curl --proto '=https' \
+            --tlsv1.2 \
+            -sSf \
+            https://sh.rustup.rs \
+            | sh -s -- \
+              -y \
+              --profile minimal \
+              --default-toolchain none
+
+          source "$HOME/.cargo/env"
+
+          rustup toolchain install \
+            "${BOOTSTRAP_VERSION}-x86_64-unknown-linux-gnu" \
+            --profile minimal
+
+          rustup default \
+            "${BOOTSTRAP_VERSION}-x86_64-unknown-linux-gnu"
+
+          rustc --version
+          cargo --version
+
+      # ============================================================
+      # 6. Configure Android NDK
+      # ============================================================
+
+      - name: Configure Android NDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          NDK="$ANDROID_NDK_ROOT"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+
+          BIN="$TOOLCHAIN/bin"
+
+          test -x "$BIN/clang"
+          test -x "$BIN/llvm-ar"
+          test -x "$BIN/ld.lld"
+
+          echo "NDK:"
+          "$BIN/clang" --version
+
+          echo "ANDROID_NDK_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_BIN=$BIN" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # 7. Create explicit Android compiler wrappers
+      #
+      # Rust's bootstrap system can use these directly.
+      # ============================================================
+
+      - name: Create Android compiler wrappers
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/android-tools"
+
+          cat > "$GITHUB_WORKSPACE/android-tools/aarch64-linux-android-clang" <<EOF
+          #!/bin/sh
+          exec "$ANDROID_NDK_BIN/aarch64-linux-android${ANDROID_API}-clang" "\$@"
+          EOF
+
+          cat > "$GITHUB_WORKSPACE/android-tools/aarch64-linux-android-clang++" <<EOF
+          #!/bin/sh
+          exec "$ANDROID_NDK_BIN/aarch64-linux-android${ANDROID_API}-clang++" "\$@"
+          EOF
+
+          cat > "$GITHUB_WORKSPACE/android-tools/aarch64-linux-android-ar" <<EOF
+          #!/bin/sh
+          exec "$ANDROID_NDK_BIN/llvm-ar" "\$@"
+          EOF
+
+          cat > "$GITHUB_WORKSPACE/android-tools/aarch64-linux-android-linker" <<EOF
+          #!/bin/sh
+          exec "$ANDROID_NDK_BIN/aarch64-linux-android${ANDROID_API}-clang" "\$@"
+          EOF
+
+          chmod +x "$GITHUB_WORKSPACE/android-tools/"*
+
+          echo "$GITHUB_WORKSPACE/android-tools" >> "$GITHUB_PATH"
+
+      # ============================================================
+      # 8. Rust bootstrap configuration
+      #
+      # BUILD  = x86_64 Linux
+      # HOST   = Android ARM64
+      #
+      # Therefore the resulting rustc itself is Android ARM64.
+      # ============================================================
+
+      - name: Configure Rust bootstrap
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cat > bootstrap.toml <<EOF
+          change-id = 99999
+
+          [build]
+          build = "${BUILD}"
+          host = ["${HOST}"]
+          target = ["${TARGET}"]
+
+          jobs = 2
+
+          extended = true
+          tools = ["cargo", "rustfmt"]
+
+          [rust]
+          channel = "stable"
+          optimize = true
+          debug = false
+          debuginfo-level = 0
+
+          [llvm]
+          download-ci-llvm = false
+
+          [target.${HOST}]
+          cc = "${GITHUB_WORKSPACE}/android-tools/aarch64-linux-android-clang"
+          cxx = "${GITHUB_WORKSPACE}/android-tools/aarch64-linux-android-clang++"
+          linker = "${GITHUB_WORKSPACE}/android-tools/aarch64-linux-android-linker"
+          ar = "${GITHUB_WORKSPACE}/android-tools/aarch64-linux-android-ar"
+          android-ndk = "${ANDROID_NDK_TOOLCHAIN}"
+
+          [target.${BUILD}]
+          cc = "clang"
+          cxx = "clang++"
+          linker = "clang"
+          ar = "llvm-ar"
+          EOF
+
+          echo "================================================"
+          echo "bootstrap.toml"
+          echo "================================================"
+
+          cat bootstrap.toml
+
+      # ============================================================
+      # 9. Verify Rust understands the configuration
+      # ============================================================
+
+      - name: Show Rust bootstrap configuration
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          source "$HOME/.cargo/env"
+
+          ./x.py \
+            check \
+            --config bootstrap.toml \
+            --host "${HOST}" \
+            --target "${TARGET}"
+
+      # ============================================================
+      # 10. Build the Android stage-1 compiler
+      #
+      # This is the first real Android rustc.
+      # ============================================================
+
+      - name: Build Android Rust compiler
+        shell: bash
+        timeout-minutes: 240
+        run: |
+          set -euxo pipefail
+
+          source "$HOME/.cargo/env"
+
+          ./x.py \
+            build \
+            --config bootstrap.toml \
+            --stage 1 \
+            --host "${HOST}" \
+            --target "${TARGET}" \
+            compiler/rustc \
+            library/std
+
+      # ============================================================
+      # 11. Build stage-2 Android compiler
+      #
+      # Stage 2 is the proper release-quality compiler.
+      # ============================================================
+
+      - name: Build stage-2 Android Rust compiler
+        shell: bash
+        timeout-minutes: 360
+        run: |
+          set -euxo pipefail
+
+          source "$HOME/.cargo/env"
+
+          ./x.py \
+            build \
+            --config bootstrap.toml \
+            --stage 2 \
+            --host "${HOST}" \
+            --target "${TARGET}" \
+            compiler/rustc \
+            library/std \
+            src/tools/cargo \
+            src/tools/rustfmt
+
+      # ============================================================
+      # 12. Build distributable artifacts
+      # ============================================================
+
+      - name: Build Rust distribution
+        shell: bash
+        timeout-minutes: 360
+        run: |
+          set -euxo pipefail
+
+          source "$HOME/.cargo/env"
+
+          ./x.py \
+            dist \
+            --config bootstrap.toml \
+            --stage 2 \
+            --host "${HOST}" \
+            --target "${TARGET}" \
+            rustc \
+            rust-std \
+            cargo \
+            rustfmt
+
+      # ============================================================
+      # 13. Locate generated Android archives
+      # ============================================================
+
+      - name: Inspect distribution
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "================================================"
+          echo "Generated distribution files"
+          echo "================================================"
+
+          find build/dist \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' \
+            | sort
+
+      # ============================================================
+      # 14. Install the Android toolchain into a prefix
+      # ============================================================
+
+      - name: Install Android Rust toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PREFIX="$GITHUB_WORKSPACE/android-rust"
+
+          rm -rf "$PREFIX"
+          mkdir -p "$PREFIX"
+
+          for archive in build/dist/*-${HOST}.tar.gz; do
+
+            [ -f "$archive" ] || continue
+
+            echo
+            echo "Installing:"
+            echo "$archive"
+
+            dirname="$(mktemp -d)"
+
+            tar \
+              -xzf "$archive" \
+              -C "$dirname"
+
+            installer="$(find "$dirname" \
+              -maxdepth 2 \
+              -name install.sh \
+              -type f \
+              | head -n 1)"
+
+            if [ -z "$installer" ]; then
+              echo "No install.sh found in $archive"
+              exit 1
+            fi
+
+            chmod +x "$installer"
+
+            "$installer" \
+              --prefix="$PREFIX"
+
+            rm -rf "$dirname"
+
+          done
+
+          echo
+          echo "Installed prefix:"
+          du -sh "$PREFIX"
+
+          find "$PREFIX/bin" \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' \
+            | sort
+
+      # ============================================================
+      # 15. Verify that the produced compiler is actually Android
+      # ============================================================
+
+      - name: Verify native Android compiler
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PREFIX="$GITHUB_WORKSPACE/android-rust"
+
+          test -x "$PREFIX/bin/rustc"
+
+          echo "================================================"
+          echo "rustc binary"
+          echo "================================================"
+
+          file "$PREFIX/bin/rustc"
+
+          echo
+          echo "================================================"
+          echo "ELF header"
+          echo "================================================"
+
+          readelf -h "$PREFIX/bin/rustc" \
+            | grep -E \
+              'Class:|Machine:|OS/ABI:'
+
+          echo
+          echo "================================================"
+          echo "Version"
+          echo "================================================"
+
+          "$PREFIX/bin/rustc" --version || true
+          "$PREFIX/bin/rustc" -vV || true
+
+      # ============================================================
+      # 16. Verify required Rust libraries exist
+      # ============================================================
+
+      - name: Verify Rust sysroot
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PREFIX="$GITHUB_WORKSPACE/android-rust"
+          LIB="$PREFIX/lib/rustlib/${HOST}/lib"
+
+          test -d "$LIB"
+
+          echo "Rust sysroot:"
+          du -sh "$LIB"
+
+          echo
+          echo "rlib count:"
+          find "$LIB" \
+            -maxdepth 1 \
+            -name '*.rlib' \
+            | wc -l
+
+          echo
+          echo "rmeta count:"
+          find "$LIB" \
+            -maxdepth 1 \
+            -name '*.rmeta' \
+            | wc -l
+
+          echo
+          echo "Example libraries:"
+          find "$LIB" \
+            -maxdepth 1 \
+            -name '*.rlib' \
+            -printf '%f\n' \
+            | sort \
+            | head -30
+
+          test "$(find "$LIB" -maxdepth 1 -name '*.rlib' | wc -l)" -gt 10
+
+      # ============================================================
+      # 17. Prepare Termux package
+      #
+      # Keep the complete sysroot.
+      # Do NOT remove .rlib files.
+      # ============================================================
+
+      - name: Prepare Termux package
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PREFIX="$GITHUB_WORKSPACE/android-rust"
+
+          mkdir -p release
+
+          cat > "$PREFIX/INSTALL-TERMUX.txt" <<EOF
+          Native Rust compiler for Android ARM64.
+
+          Target/host:
+            ${HOST}
+
+          Built for:
+            Termux / Android ARM64
+
+          Install:
+            tar -xJf rust-${RUST_VERSION}-${HOST}-termux.tar.xz -C \$PREFIX
+
+          Test:
+            rustc --version
+            rustc -vV
+
+          Compile:
+            rustc hello.rs
+
+          Cargo:
+            cargo --version
+            cargo new hello
+            cd hello
+            cargo run
+
+          IMPORTANT:
+            Keep the complete lib/rustlib/${HOST}/lib directory.
+            The .rlib files are required by rustc.
+          EOF
+
+          cd "$PREFIX"
+
+          tar \
+            -cJf \
+            "$GITHUB_WORKSPACE/release/rust-${RUST_VERSION}-${HOST}-termux.tar.xz" \
+            .
+
+      # ============================================================
+      # 18. SHA-256
+      # ============================================================
+
+      - name: Create checksum
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd release
+
+          sha256sum \
+            "rust-${RUST_VERSION}-${HOST}-termux.tar.xz" \
+            > \
+            "rust-${RUST_VERSION}-${HOST}-termux.tar.xz.sha256"
+
+          cat \
+            "rust-${RUST_VERSION}-${HOST}-termux.tar.xz.sha256"
+
+          ls -lh
+
+      # ============================================================
+      # 19. Upload final artifact
+      # ============================================================
+
+      - name: Upload Rust Android toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-${{ env.RUST_VERSION }}-${{ env.HOST }}-termux
+          path: |
+            release/*.tar.xz
+            release/*.sha256
+          if-no-files-found: error
