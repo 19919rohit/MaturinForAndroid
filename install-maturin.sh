@@ -2,88 +2,97 @@
 set -e
 
 REPO="19919rohit/MaturinForAndroid"
-API="https://api.github.com/repos/$REPO/releases/latest"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 BIN="$PREFIX/bin/maturin"
 TMP="$PREFIX/tmp/maturin-install"
 
-printf '\n==> MaturinForAndroid installer\n'
-
-command -v curl >/dev/null 2>&1 || {
-    echo "Error: curl is required."
-    echo "Install it with: pkg install curl"
+command -v curl >/dev/null || {
+    echo "Error: curl is required. Install it with: pkg install curl"
     exit 1
 }
 
-command -v python >/dev/null 2>&1 || {
+command -v python >/dev/null || {
     echo "Error: Python is required."
     exit 1
 }
 
-ARCH="$(uname -m)"
-[ "$ARCH" = "aarch64" ] || {
-    echo "Error: unsupported architecture: $ARCH"
-    echo "This release supports ARM64 (aarch64) Android."
+[ "$(uname -m)" = "aarch64" ] || {
+    echo "Error: this installer requires an ARM64 (aarch64) device."
     exit 1
 }
 
 mkdir -p "$TMP"
-rm -f "$TMP"/*
+rm -rf "$TMP"/*
 
-echo "==> Checking latest release..."
+echo "Available Maturin releases:"
+echo
 
-ASSET_URL="$(
-    curl -fsSL "$API" |
-    python -c '
+curl -fsSL "https://api.github.com/repos/$REPO/releases" |
+python -c '
 import json,sys
-data=json.load(sys.stdin)
-assets=data.get("assets",[])
-for a in assets:
-    name=a.get("name","").lower()
-    if "maturin" in name and ("android" in name or "aarch64" in name or "arm64" in name):
+for r in json.load(sys.stdin):
+    if not r.get("draft"):
+        print("  " + r["tag_name"])
+'
+
+echo
+printf "Enter release tag (for example, v1.14.1-android): "
+read -r TAG
+
+[ -n "$TAG" ] || {
+    echo "Error: release tag is required."
+    exit 1
+}
+
+echo
+echo "==> Finding Android ARM64 binary..."
+
+URL="$(
+curl -fsSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" |
+python -c '
+import json,sys
+d=json.load(sys.stdin)
+for a in d.get("assets",[]):
+    n=a["name"].lower()
+    if "android" in n and ("aarch64" in n or "arm64" in n):
         print(a["browser_download_url"])
         break
 '
 )"
 
-[ -n "$ASSET_URL" ] || {
-    echo "Error: no compatible Maturin Android ARM64 release asset found."
+[ -n "$URL" ] || {
+    echo "Error: no Android ARM64 binary found for $TAG."
     exit 1
 }
 
-ASSET_NAME="${ASSET_URL##*/}"
-DOWNLOAD="$TMP/$ASSET_NAME"
+NAME="${URL##*/}"
+FILE="$TMP/$NAME"
 
-echo "==> Downloading $ASSET_NAME"
-curl -fL --retry 3 --progress-bar "$ASSET_URL" -o "$DOWNLOAD"
+echo "==> Downloading $NAME"
+curl -fL --retry 3 --progress-bar "$URL" -o "$FILE"
 
 echo "==> Installing..."
 
-case "$ASSET_NAME" in
+case "$NAME" in
     *.tar.gz|*.tgz)
-        tar -xzf "$DOWNLOAD" -C "$TMP"
+        tar -xzf "$FILE" -C "$TMP"
         FOUND="$(find "$TMP" -type f -name maturin -print -quit)"
         ;;
     *.zip)
-        command -v unzip >/dev/null 2>&1 || {
-            echo "Error: unzip is required."
-            echo "Install it with: pkg install unzip"
+        command -v unzip >/dev/null || {
+            echo "Error: unzip is required. Install it with: pkg install unzip"
             exit 1
         }
-        unzip -qo "$DOWNLOAD" -d "$TMP"
+        unzip -qo "$FILE" -d "$TMP"
         FOUND="$(find "$TMP" -type f -name maturin -print -quit)"
         ;;
-    maturin|maturin-*)
-        FOUND="$DOWNLOAD"
-        ;;
     *)
-        echo "Error: unsupported release asset: $ASSET_NAME"
-        exit 1
+        FOUND="$FILE"
         ;;
 esac
 
-[ -n "$FOUND" ] || {
-    echo "Error: maturin binary was not found in the release."
+[ -f "$FOUND" ] || {
+    echo "Error: Maturin binary not found."
     exit 1
 }
 
@@ -91,8 +100,7 @@ install -m 755 "$FOUND" "$BIN"
 rm -rf "$TMP"
 
 echo
-echo "==> Installation complete!"
-echo "==> Location: $BIN"
-echo "==> Version:"
+echo "Maturin installed successfully."
+echo "Location: $BIN"
+echo "Version:"
 "$BIN" --version
-echo
